@@ -281,7 +281,9 @@ har-diff redacts by default, in three layers:
 
 Layer 3 is deliberately limited to distinctive prefixes. A broad "anything long and random" sweep would also destroy the object references the tool exists to report.
 
-Raw request and response bodies are never rendered in any format — only their content type, size and parameter names. Emitted `curl` commands carry `$HARDIFF_<LABEL>_TOKEN` / `$HARDIFF_<LABEL>_COOKIE` placeholders, never a real credential.
+Response bodies are never rendered, and neither is a request body in `parse`, `diff` or `objects` — only its content type, size and parameter names. A request body *is* rendered in the `plan` command's `curl`, because a replay that omits the body does not reproduce the request. It goes through a structural redaction first: JSON leaves, form fields and `multipart/form-data` parts whose name reads as a credential have their value replaced with `[REDACTED]`, and the rest of the body is left byte for byte. `Referer` and `Origin` are URLs and get the same query-parameter treatment as the request's own URL. Emitted `curl` commands carry `$HARDIFF_<LABEL>_TOKEN` / `$HARDIFF_<LABEL>_COOKIE` placeholders, never a real credential.
+
+Redaction is name-driven, so a credential in a field named like an identifier survives it. That is why `plan` output is still capture-derived material: review it before pasting it anywhere.
 
 `--unsafe-show-secrets` disables all of it. It prints a warning to stderr first, and you should not use it on anything you intend to share.
 
