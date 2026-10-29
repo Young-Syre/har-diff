@@ -149,3 +149,35 @@ describe('templatePath', () => {
     assert.equal(placeholderFor('uuid'), '{uuid}');
   });
 });
+
+describe('a separator is not a character class', () => {
+  // charClasses counted [-_] as a class, so any lowercase path segment of 16
+  // characters or more containing a hyphen reached two classes and was
+  // classified as an opaque token. Two unrelated routes then templated to the
+  // same slot, which merged endpoints in the diff.
+  it('a hyphenated route name is not an opaque token', () => {
+    for (const value of [
+      'two-factor-authentication',
+      'security-notifications-page',
+      'email-preferences-centre',
+    ]) {
+      assert.equal(classifyIdentifier(value), null, value);
+    }
+  });
+
+  it('two hyphenated routes keep their own templates', () => {
+    assert.equal(
+      templatePath('/api/v1/account/two-factor-authentication').templatePath,
+      '/api/v1/account/two-factor-authentication',
+    );
+    assert.notEqual(
+      templatePath('/api/v1/account/two-factor-authentication').templatePath,
+      templatePath('/api/v1/account/security-notifications-page').templatePath,
+    );
+  });
+
+  it('a real opaque token is still classified', () => {
+    assert.equal(classifyIdentifier('dBjftJeZ4CVPmB92K27uhbUJU1p1r'), 'base64url');
+    assert.equal(classifyIdentifier('v1_8Hk2Lm9Pq4Rs7Tu0Wx'), 'base64url');
+  });
+});

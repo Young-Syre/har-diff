@@ -54,12 +54,18 @@ export interface ClassifyContext {
   key?: string;
 }
 
+/**
+ * How many of lower, upper and digit the value draws on. Separators are
+ * deliberately not counted: a hyphen is what route names are made of, so
+ * counting it made every lowercase path segment of 16 characters or more
+ * ("two-factor-authentication") read as an opaque token, and two unrelated
+ * routes then templated to the same slot.
+ */
 function charClasses(value: string): number {
   let n = 0;
   if (/[a-z]/.test(value)) n += 1;
   if (/[A-Z]/.test(value)) n += 1;
   if (/\d/.test(value)) n += 1;
-  if (/[-_]/.test(value)) n += 1;
   return n;
 }
 
