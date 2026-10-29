@@ -1,0 +1,85 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: No fixture credential survives any command in any format
+        # This is the guarantee the tool is built around, so it is asserted
+        # against the shipped captures across the whole command/format matrix
+        # rather than trusted to the unit tests alone. The fixture tokens all
+        # carry a FIXTURE marker, which makes a leak greppable.
+        run: |
+          set -e
+          fail=0
+          for cmd in parse diff objects plan; do
+            for fmt in text json markdown; do
+              out=$(node dist/src/cli.js "$cmd" test/fixtures/admin.har test/fixtures/user.har \
+                      --label admin --label user --format "$fmt")
+              if printf '%s' "$out" | grep -q 'FIXTURE'; then
+                echo "LEAK: $cmd/$fmt emitted a fixture credential"
+                fail=1
+              fi
+              if printf '%s' "$out" | grep -qE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'; then
+                echo "LEAK: $cmd/$fmt emitted a JWT"
+                fail=1
+              fi
+              if [ -z "$out" ]; then
+                echo "EMPTY: $cmd/$fmt produced nothing"
+                fail=1
+              fi
+            done
+          done
+          [ "$fail" -eq 0 ] && echo "12 command/format combinations, no credential in any"
+          exit "$fail"
+
+      - name: The escape hatch actually works
+        # A redaction default nobody can turn off is a tool you cannot verify.
+        # --unsafe-show-secrets has to print the credential, or the flag is a lie.
+        run: |
+          out=$(node dist/src/cli.js objects test/fixtures/admin.har test/fixtures/user.har \
+                  --label admin --label user --format json --unsafe-show-secrets)
+          printf '%s' "$out" | grep -q 'FIXTURE' \
+            || { echo "--unsafe-show-secrets redacted anyway"; exit 1; }
+          echo "--unsafe-show-secrets prints the credential, as documented"
+
+      - name: Still useful after redaction
+        # Redaction must not hollow out the report.
+        run: |
+          node dist/src/cli.js plan test/fixtures/admin.har test/fixtures/user.har \
+            --label admin --label user --format markdown > plan.md
+          grep -q '/api/v1/users' plan.md || { echo "lost the endpoint data"; exit 1; }
+          grep -q 'HARDIFF_' plan.md || { echo "no credential placeholder in the plan"; exit 1; }
+          echo "plan keeps the endpoints and substitutes placeholders"
+
+      - name: Reads no network
+        run: |
+          set -e
+          ! grep -rlE "require\(['\"](http|https|net|dns|tls)|from ['\"]node:(http|https|net|dns|tls)|[^a-zA-Z]fetch\(" src/
+          echo "no HTTP, DNS or fetch anywhere in src/"
