@@ -5,9 +5,10 @@ import { diffCaptures } from '../src/diff.js';
 import { renderDiff, renderObjects, renderParse, renderPlan } from '../src/format.js';
 import { extractObjects } from '../src/objects.js';
 import { buildPlan } from '../src/plan.js';
+import { multipartBoundary, parseHar } from '../src/har.js';
 import { isSensitiveHeader, isSensitiveKey, looksLikeSecret, Redactor } from '../src/redact.js';
 import type { OutputFormat } from '../src/types.js';
-import { FIXTURE_SECRETS, loadFixtures } from './helpers.js';
+import { FIXTURE_SECRETS, loadFixtures, makeHar } from './helpers.js';
 
 const FORMATS: OutputFormat[] = ['text', 'json', 'markdown'];
 
@@ -170,5 +171,106 @@ describe('sensitivity classification', () => {
     assert.equal(looksLikeSecret('AKIAIOSFODNN7EXAMPLE'), true);
     assert.equal(looksLikeSecret('9f2b4c6d-15a7-4e3b-93c8-2d7a6b41e0f5'), false);
     assert.equal(looksLikeSecret('8123'), false);
+  });
+});
+
+describe('the three layers that used to miss a credential', () => {
+  const BOUNDARY = '----WebKitFormBoundaryAbC123';
+  const PASSWORD = 'MULTIPART-PLAINTEXT-PW';
+  const REFERER_TOKEN = 'PWRESET-SECRET-9f8e7d6c5b4a';
+  const CAMEL_TOKENS = ['AUTHTOKEN-OPAQUE-1234567890', 'SESSTOK-OPAQUE-0987654321'];
+
+  const multipartBody = [
+    `--${BOUNDARY}\r\nContent-Disposition: form-data; name="username"\r\n\r\nalice\r\n`,
+    `--${BOUNDARY}\r\nContent-Disposition: form-data; name="password"\r\n\r\n${PASSWORD}\r\n`,
+    `--${BOUNDARY}--\r\n`,
+  ].join('');
+
+  async function planFor(): Promise<string> {
+    const privileged = parseHar(
+      makeHar([
+        {
+          url: 'https://app.t.test/api/admin/users/8123',
+          headers: [
+            { name: 'Referer', value: `https://app.t.test/invite/accept?invite_token=${REFERER_TOKEN}` },
+          ],
+          response: { ok: true },
+        },
+        {
+          method: 'POST',
+          url: 'https://app.t.test/api/login',
+          headers: [{ name: 'Content-Type', value: `multipart/form-data; boundary=${BOUNDARY}` }],
+          body: { mimeType: `multipart/form-data; boundary=${BOUNDARY}`, text: multipartBody },
+          response: { ok: true },
+        },
+        {
+          method: 'POST',
+          url: 'https://app.t.test/api/profile',
+          headers: [{ name: 'Content-Type', value: 'application/json' }],
+          body: {
+            mimeType: 'application/json',
+            text: JSON.stringify({ authToken: CAMEL_TOKENS[0], sessionToken: CAMEL_TOKENS[1] }),
+          },
+          response: { ok: true },
+        },
+      ]),
+      { label: 'admin' },
+    );
+    const unprivileged = parseHar(
+      makeHar([{ url: 'https://app.t.test/api/profile', response: { ok: true } }]),
+      { label: 'user' },
+    );
+    const captures = [privileged, unprivileged];
+    const redactor = new Redactor(captures.flatMap((capture) => capture.secrets));
+    const objects = extractObjects(captures);
+    const diff = diffCaptures(captures, { objects });
+    return renderPlan(buildPlan(captures, diff), 'markdown', redactor);
+  }
+
+  it('a token in a Referer does not reach the plan', async () => {
+    // Referer is kept because it changes how the server routes and
+    // authorises. It is also a whole URL, and the URL that sent you somewhere
+    // is where a one-time invite or reset token lives.
+    assert.doesNotMatch(await planFor(), new RegExp(REFERER_TOKEN));
+  });
+
+  it('a multipart password does not reach the plan', async () => {
+    const plan = await planFor();
+    assert.doesNotMatch(plan, new RegExp(PASSWORD));
+    assert.match(plan, /alice/, 'a part that is not a credential is left alone');
+  });
+
+  it('a camelCase credential field does not reach the plan', async () => {
+    const plan = await planFor();
+    for (const token of CAMEL_TOKENS) assert.doesNotMatch(plan, new RegExp(token));
+  });
+
+  it('camelCase and snake_case spellings of a field name agree', () => {
+    for (const name of [
+      'authToken',
+      'sessionToken',
+      'apiToken',
+      'userToken',
+      'sessionKey',
+      'accessToken',
+      'auth_token',
+      'session-key',
+    ]) {
+      assert.equal(isSensitiveKey(name), true, name);
+    }
+  });
+
+  it('the boundary is recovered from the body when the content type lost it', () => {
+    // A canonical request keeps the content type without its parameters, so by
+    // the time a body reaches the plan the boundary is only in the body.
+    assert.equal(multipartBoundary(multipartBody, 'multipart/form-data'), BOUNDARY);
+    assert.equal(multipartBoundary(multipartBody, null), BOUNDARY);
+    assert.equal(multipartBoundary('{"a":1}', 'application/json'), null);
+  });
+
+  it('the in-memory API reports no file rather than its label', () => {
+    const capture = parseHar(makeHar([{ url: 'https://app.t.test/a' }]), { label: 'admin' });
+    assert.equal(capture.label, 'admin');
+    assert.equal(capture.file, '<memory>');
   });
 });

@@ -53,7 +53,7 @@ export const SENSITIVE_HEADERS: ReadonlySet<string> = new Set([
 
 /** Parameter/field names whose value is treated as a credential. */
 export const SENSITIVE_KEY =
-  /^(?:.*[._-])?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|bearer[_-]?token|api[_-]?key|apikey|app[_-]?secret|client[_-]?secret|private[_-]?key|secret|password|passwd|pwd|passphrase|credential|credentials|session[_-]?id|sessionid|session|sid|jsessionid|phpsessid|token|auth|authorization|csrf|csrf[_-]?token|xsrf[_-]?token|signature|sig|otp|mfa[_-]?code|totp|recovery[_-]?code)$/i;
+  /^(?:.*[._-])?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|bearer[_-]?token|api[_-]?key|apikey|app[_-]?secret|client[_-]?secret|private[_-]?key|secret|password|passwd|pwd|passphrase|credential|credentials|session[_-]?id|sessionid|session[_-]?key|session|sid|jsessionid|phpsessid|token|auth|authorization|csrf|csrf[_-]?token|xsrf[_-]?token|signature|sig|otp|mfa[_-]?code|totp|recovery[_-]?code)$/i;
 
 interface TokenPattern {
   readonly label: string;
@@ -102,10 +102,24 @@ export function isSensitiveHeader(name: string): boolean {
   return SENSITIVE_HEADERS.has(name.trim().toLowerCase());
 }
 
+/**
+ * Insert a separator at every camelCase boundary, so that one spelling of a
+ * field name is tested. SENSITIVE_KEY's prefix group requires an explicit
+ * `.`, `_` or `-`, which meant `accessToken` matched (the alternation
+ * happens to span it) while `authToken`, `sessionToken`, `apiToken` and
+ * `userToken` did not.
+ */
+function snakeify(name: string): string {
+  return name.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+}
+
 export function isSensitiveKey(name: string): boolean {
   // For dotted body paths, judge the last segment.
   const leaf = name.split(/[.[]/).filter((part) => part !== '' && part !== ']').pop() ?? name;
-  return SENSITIVE_KEY.test(leaf) || SENSITIVE_KEY.test(name);
+  for (const candidate of [leaf, name]) {
+    if (SENSITIVE_KEY.test(candidate) || SENSITIVE_KEY.test(snakeify(candidate))) return true;
+  }
+  return false;
 }
 
 /** True when a value matches one of the high-confidence credential shapes. */
@@ -213,8 +227,6 @@ export class Redactor {
 function decodeRedactionMarkers(url: string): string {
   return url.replace(/%5BREDACTED%5D/gi, REDACTED);
 }
-
-export const PASSTHROUGH = new Redactor([], { showSecrets: true });
 
 export const UNSAFE_WARNING =
   'WARNING: --unsafe-show-secrets is set. Output below contains live session ' +

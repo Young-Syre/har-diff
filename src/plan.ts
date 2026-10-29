@@ -10,7 +10,7 @@
  * test.
  */
 
-import { walkJson } from './har.js';
+import { multipartBoundary, walkJson } from './har.js';
 import { isSensitiveHeader, isSensitiveKey, redactBodyString, REDACTED } from './redact.js';
 import type {
   Capture,
@@ -33,6 +33,9 @@ const KEEP_HEADERS: ReadonlySet<string> = new Set([
   'origin',
   'referer',
 ]);
+
+/** Kept headers whose value is a URL, so it goes through sanitiseUrl. */
+const URL_HEADERS: ReadonlySet<string> = new Set(['origin', 'referer']);
 
 /** Authentication schemes safe to echo back - the scheme is not the secret. */
 const AUTH_SCHEMES: ReadonlySet<string> = new Set([
@@ -89,6 +92,36 @@ function sanitiseUrl(url: string): string {
   return parsed.toString().replace(/%5BREDACTED%5D/gi, REDACTED);
 }
 
+/**
+ * Replace the body of every credential-named part of a multipart body,
+ * leaving the boundaries, part headers and other parts byte for byte. Returns
+ * null when the content type carries no boundary.
+ */
+function sanitiseMultipart(body: string, contentType: string): string | null {
+  const boundary = multipartBoundary(body, contentType);
+  if (boundary === null) return null;
+
+  const delimiter = `--${boundary}`;
+  const chunks = body.split(delimiter);
+  let changed = false;
+  const rewritten = chunks.map((chunk) => {
+    const lead = /^\r?\n/.exec(chunk)?.[0] ?? '';
+    const rest = chunk.slice(lead.length);
+    if (rest === '' || rest.startsWith('--')) return chunk;
+    const split = /\r?\n\r?\n/.exec(rest);
+    if (split === null) return chunk;
+    const head = rest.slice(0, split.index);
+    const tail = rest.slice(split.index + split[0].length);
+    const nameMatch = /name=(?:"([^"]*)"|([^;\r\n]+))/i.exec(head);
+    const name = nameMatch?.[1] ?? nameMatch?.[2];
+    if (name === undefined || !isSensitiveKey(name)) return chunk;
+    const trailing = /\r?\n$/.exec(tail)?.[0] ?? '';
+    changed = true;
+    return `${lead}${head}${split[0]}${REDACTED}${trailing}`;
+  });
+  return changed ? rewritten.join(delimiter) : null;
+}
+
 function isJsonBody(contentType: string | null): boolean {
   if (contentType === null) return false;
   return contentType === 'application/json' || contentType.endsWith('+json') || contentType === 'text/json';
@@ -99,6 +132,10 @@ export function sanitiseBody(body: string | null, contentType: string | null): s
   if (body === null || body.length === 0) return body;
   if (isJsonBody(contentType)) {
     const replaced = replaceJsonLeaves(body, (path) => (isSensitiveKey(path) ? REDACTED : undefined));
+    if (replaced !== null) return replaced;
+  }
+  if (contentType !== null && contentType.toLowerCase().startsWith('multipart/')) {
+    const replaced = sanitiseMultipart(body, contentType);
     if (replaced !== null) return replaced;
   }
   if (contentType === 'application/x-www-form-urlencoded') {
@@ -162,8 +199,12 @@ function planHeaders(request: CanonicalRequest, replayLabel: string): ReplayHead
   for (const header of request.requestHeaders) {
     const lower = header.name.toLowerCase();
     if (!KEEP_HEADERS.has(lower)) continue;
-    headers.push({ name: header.name, value: header.value });
-    curlHeaders.push(`-H ${shellSingleQuote(`${header.name}: ${header.value}`)}`);
+    // Referer and Origin are whole URLs, and a URL gets the same treatment
+    // here as the request's own: the page that sent you somewhere is exactly
+    // where a one-time invite or password-reset token lives.
+    const value = URL_HEADERS.has(lower) ? sanitiseUrl(header.value) : header.value;
+    headers.push({ name: header.name, value });
+    curlHeaders.push(`-H ${shellSingleQuote(`${header.name}: ${value}`)}`);
   }
 
   const authHeader = request.requestHeaders.find((header) => header.name.toLowerCase() === 'authorization');

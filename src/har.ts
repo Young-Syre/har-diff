@@ -120,6 +120,79 @@ function leafToString(value: string | number | boolean | null): string | null {
   return String(value);
 }
 
+/**
+ * Credential-named query values inside a URL written in a header value.
+ * Returns nothing when the value is not a URL, which is the common case.
+ */
+function sensitiveQueryValues(value: string): string[] {
+  if (!/^https?:\/\//i.test(value.trim())) return [];
+  let parsed: URL;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const [name, param] of parsed.searchParams) {
+    if (param !== '' && (isSensitiveKey(name) || looksLikeSecret(param))) found.push(param);
+  }
+  return found;
+}
+
+/**
+ * The boundary of a multipart body: from the content type when it carries one,
+ * otherwise from the body's own opening delimiter.
+ *
+ * The fallback is not a nicety. A canonical request keeps the content type
+ * without its parameters, so by the time a body reaches the plan the boundary
+ * is only still present in the body itself.
+ */
+export function multipartBoundary(body: string, contentType: string | null): string | null {
+  if (contentType !== null) {
+    const match = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType);
+    const declared = match?.[1] ?? match?.[2];
+    if (declared !== undefined && declared !== '') return declared;
+  }
+  const first = /^--(\S+?)(--)?\r?(?:\n|$)/.exec(body);
+  const observed = first?.[1];
+  return observed === undefined || observed === '' ? null : observed;
+}
+
+interface MultipartPart {
+  readonly name: string;
+  readonly value: string;
+}
+
+/**
+ * Split a multipart body into its named parts. Returns null when the content
+ * type is not multipart or carries no boundary.
+ *
+ * This is a reader for a captured body, not a conformant parser: a part whose
+ * name cannot be read is skipped rather than guessed at, and a file part's
+ * bytes are treated as its value so that a credential pasted into one is still
+ * seen.
+ */
+function multipartParts(body: string, contentType: string | null): MultipartPart[] | null {
+  if (contentType === null || !contentType.toLowerCase().startsWith('multipart/')) return null;
+  const boundary = multipartBoundary(body, contentType);
+  if (boundary === null) return null;
+
+  const parts: MultipartPart[] = [];
+  for (const chunk of body.split(`--${boundary}`)) {
+    const trimmed = chunk.replace(/^\r?\n/, '');
+    if (trimmed === '' || trimmed.startsWith('--')) continue;
+    const split = /\r?\n\r?\n/.exec(trimmed);
+    if (split === null) continue;
+    const head = trimmed.slice(0, split.index);
+    const value = trimmed.slice(split.index + split[0].length).replace(/\r?\n$/, '');
+    const nameMatch = /name=(?:"([^"]*)"|([^;\r\n]+))/i.exec(head);
+    const name = nameMatch?.[1] ?? nameMatch?.[2];
+    if (name === undefined || name === '') continue;
+    parts.push({ name, value });
+  }
+  return parts;
+}
+
 interface BodyAnalysis {
   params: BodyParam[];
   secrets: string[];
@@ -161,6 +234,16 @@ function analyseBody(
 
   if (isFormContentType(contentType) && formParams.length === 0) {
     for (const [name, value] of new URLSearchParams(body)) record(name, value, 'form');
+    return { params, secrets };
+  }
+
+  // multipart/form-data writes its field names in a Content-Disposition
+  // header rather than as key=value, so neither the JSON walk nor the
+  // URLSearchParams pass sees them, and a password in a multipart login form
+  // reached the plan in plaintext.
+  const multipart = multipartParts(body, contentType);
+  if (multipart !== null) {
+    for (const part of multipart) record(part.name, part.value, 'form');
     return { params, secrets };
   }
 
@@ -257,6 +340,11 @@ function normaliseEntry(
       secrets.push(header.value);
       secrets.push(...cookieValues(header.value));
     }
+    // Referer and Origin are kept in a replay plan because they change how the
+    // server routes and authorises the request. A Referer is a whole URL, and
+    // the URL that sent you somewhere is exactly where a one-time invite or
+    // password-reset token lives.
+    secrets.push(...sensitiveQueryValues(header.value));
   }
   for (const header of responseHeaders) {
     if (isSensitiveHeader(header.name) || looksLikeSecret(header.value)) {
@@ -400,7 +488,10 @@ export function parseHar(source: string | unknown, options: ParseOptions = {}): 
 
   return {
     label,
-    file: options.label === undefined ? '<memory>' : options.label,
+    // parseHar has no file. parseHarFile overrides this with the real path;
+    // using the label here put a label in the FILE column of every report
+    // that went through the in-memory API.
+    file: '<memory>',
     requests,
     warnings,
     secrets: [...new Set(secrets.filter((value) => value.trim().length > 0))],
