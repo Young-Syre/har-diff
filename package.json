@@ -1,0 +1,56 @@
+{
+  "name": "har-diff",
+  "version": "0.1.0",
+  "description": "Diff HAR captures from two or more privilege levels and generate an authorisation (IDOR/BOLA) test plan.",
+  "license": "MIT",
+  "author": "David Nichols",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "har-diff": "dist/src/cli.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "har",
+    "idor",
+    "bola",
+    "authorization",
+    "appsec",
+    "security",
+    "pentest",
+    "bug-bounty"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Young-Syre/har-diff.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Young-Syre/har-diff/issues"
+  },
+  "homepage": "https://github.com/Young-Syre/har-diff#readme",
+  "scripts": {
+    "build": "tsc --build --force",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

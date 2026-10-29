@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
+.env
+.env.*
+
+# Never commit real captures - they contain live session credentials.
+*.har
+!test/fixtures/*.har
