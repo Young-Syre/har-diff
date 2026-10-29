@@ -152,11 +152,33 @@ describe('curl emission', () => {
   });
 
   it('sends a body only for requests that had one', async () => {
-    const plan = await fixturePlan();
-    for (const candidate of plan.candidates) {
-      const hasBody = candidate.request.body !== null && candidate.request.body.length > 0;
-      assert.equal(candidate.curl.includes('--data-raw'), hasBody, `${candidate.id} body handling`);
+    // Both sides of this used to derive from the same sanitised body, so the
+    // assertion held whatever sanitiseBody returned, including nothing. The
+    // comparison is against the *source capture's* request body.
+    const { admin, user } = await loadFixtures();
+    const sourceHasBody = new Map<string, boolean>();
+    for (const capture of [admin, user]) {
+      for (const request of capture.requests) {
+        sourceHasBody.set(
+          `${request.method} ${request.url}`,
+          request.requestBody !== null && request.requestBody.length > 0,
+        );
+      }
     }
+
+    const plan = await fixturePlan();
+    let checked = 0;
+    for (const candidate of plan.candidates) {
+      const expected = sourceHasBody.get(`${candidate.request.method} ${candidate.request.url}`);
+      if (expected === undefined) continue;
+      checked += 1;
+      assert.equal(candidate.curl.includes('--data-raw'), expected, `${candidate.id} body handling`);
+    }
+    assert.ok(checked > 0, 'at least one candidate was matched back to the capture');
+    assert.ok(
+      [...sourceHasBody.values()].some((has) => has),
+      'the fixture contains a request with a body, so the true case is covered',
+    );
   });
 });
 

@@ -89,22 +89,27 @@ export interface JsonLeaf {
  */
 export function walkJson(root: unknown, maxDepth = DEFAULT_MAX_DEPTH): JsonLeaf[] {
   const leaves: JsonLeaf[] = [];
-  const seen = new Set<object>();
+  // Ancestors on the current path, not everything visited. A cycle is only a
+  // cycle if the value is its own ancestor; a global visited set also drops
+  // *shared* references, so `{a: shared, b: shared}` reported only `a`'s
+  // leaves. Every call site inside this package passes JSON.parse output,
+  // which can have both and neither, but walkJson is exported and takes
+  // `unknown`.
+  const ancestors = new Set<object>();
 
   const visit = (value: unknown, path: string, depth: number): void => {
     if (depth > maxDepth) return;
-    if (Array.isArray(value)) {
-      if (seen.has(value)) return;
-      seen.add(value);
-      for (const item of value) visit(item, `${path}[]`, depth + 1);
-      return;
-    }
-    if (isRecord(value)) {
-      if (seen.has(value)) return;
-      seen.add(value);
-      for (const [key, child] of Object.entries(value)) {
-        visit(child, path === '' ? key : `${path}.${key}`, depth + 1);
+    if (Array.isArray(value) || isRecord(value)) {
+      if (ancestors.has(value)) return;
+      ancestors.add(value);
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, `${path}[]`, depth + 1);
+      } else {
+        for (const [key, child] of Object.entries(value)) {
+          visit(child, path === '' ? key : `${path}.${key}`, depth + 1);
+        }
       }
+      ancestors.delete(value);
       return;
     }
     if (value === undefined) return;

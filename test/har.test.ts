@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { groupBySignature, parseHar, walkJson } from '../src/har.js';
+import { extractObjects, refsBySlot } from '../src/objects.js';
 import { loadFixtures, makeHar } from './helpers.js';
 
 describe('parseHar', () => {
@@ -133,5 +134,66 @@ describe('walkJson', () => {
     const cyclic: Record<string, unknown> = { id: 7 };
     cyclic['self'] = cyclic;
     assert.doesNotThrow(() => walkJson(cyclic));
+  });
+});
+
+describe('walkJson guards cycles without dropping shared references', () => {
+  // The old guard was a global visited set. It was unreachable from inside the
+  // package (every call site feeds it JSON.parse output), and it silently
+  // dropped a value referenced twice -- which matters because walkJson is
+  // exported and takes `unknown`.
+  it('visits a shared reference everywhere it appears', () => {
+    const shared = { token: 'abc', id: 7 };
+    const leaves = walkJson({ a: shared, b: shared });
+    const paths = leaves.map((leaf) => leaf.path).sort();
+    assert.deepEqual(paths, ['a.id', 'a.token', 'b.id', 'b.token']);
+  });
+
+  it('visits a shared array everywhere it appears', () => {
+    const shared = [1, 2];
+    const leaves = walkJson({ a: shared, b: shared });
+    assert.equal(leaves.length, 4);
+  });
+
+  it('terminates on a genuine cycle', () => {
+    const node: Record<string, unknown> = { name: 'root' };
+    node['self'] = node;
+    const leaves = walkJson(node);
+    assert.deepEqual(leaves, [{ path: 'name', value: 'root' }]);
+  });
+
+  it('terminates on a cycle through an array', () => {
+    const list: unknown[] = ['first'];
+    list.push(list);
+    const leaves = walkJson({ list });
+    assert.deepEqual(leaves, [{ path: 'list[]', value: 'first' }]);
+  });
+});
+
+describe('refsBySlot', () => {
+  // Exported from the package with no caller and no test, which is how a
+  // public accessor rots. One test is cheaper than removing it.
+  it('indexes every ref under each slot it was seen in', () => {
+    const captures = [
+      parseHar(
+        makeHar([
+          { url: 'https://app.t.test/api/users/8123', response: { ok: true } },
+          { url: 'https://app.t.test/api/users/8124', response: { ok: true } },
+        ]),
+        { label: 'admin' },
+      ),
+    ];
+    const bySlot = refsBySlot(extractObjects(captures).refs);
+    assert.ok(bySlot.size > 0, 'at least one slot');
+    for (const [slot, refs] of bySlot) {
+      assert.ok(refs.length > 0, `${slot} has refs`);
+      assert.equal(new Set(refs).size, refs.length, `${slot} has no duplicate refs`);
+      for (const ref of refs) {
+        assert.ok(
+          ref.occurrences.some((occurrence) => occurrence.slot === slot),
+          `${ref.value} really occurs in ${slot}`,
+        );
+      }
+    }
   });
 });
